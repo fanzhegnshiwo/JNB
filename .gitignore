@@ -1,0 +1,22 @@
+# Build output
+obj/
+*.o
+*.d
+*.elf
+*.hex
+*.map
+*.lst
+
+# IDE workspace files
+.mrs-workspace
+*.snapshot
+.settings/
+.vscode/
+.project
+.cproject
+.template
+*.launch
+
+# Library binaries (too large for GitHub)
+LIB/*.a
+LIB/*.hex
