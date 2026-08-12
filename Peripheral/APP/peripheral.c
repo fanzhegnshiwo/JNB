@@ -19,6 +19,7 @@
 #include "gattprofile.h"
 #include "peripheral.h"
 #include <stdio.h>
+#include <string.h>
 #include <CH58x_sys.h>
 /*********************************************************************
  * MACROS
@@ -35,6 +36,7 @@ float dif=0;
 uint8_t LED_flag=0;
 uint8_t charValue1[SIMPLEPROFILE_CHAR1_LEN];
 uint8_t charValue2[SIMPLEPROFILE_CHAR2_LEN]={0};
+uint8_t newValue[15]={0};
 
 uint32_t adcBuff[40];
 uint32_t sum[4];
@@ -93,7 +95,6 @@ uint16_t user_tx_buffer_read_index=0;
 uint8_t uart_tx_buffer[50];
 uint8_t Rx_ok;
 uint8_t Rx_cnt;
-float Result;
 
 uint16_t Time_Flag=0;//0x012C;
 uint16_t Standby_flag=0;//
@@ -101,8 +102,10 @@ uint16_t Sampling_flag=0;
 
 float B_led[3];
 float C_led[3];
-unsigned char byte_arr[16]={0};
+unsigned char byte_arr[32]={0};
 unsigned char jeiguo[12]={0};
+float Result_1=0;
+float Result_2=0;
 float Result=0;
 
 void app_uart_process(void);
@@ -334,7 +337,6 @@ void Peripheral_Init()
     // Setup the SimpleProfile Characteristic Values
     
     {
-        charValue1[46]=01;
         //uint8_t charValue2[SIMPLEPROFILE_CHAR2_LEN] = {2};
         uint8_t charValue3[SIMPLEPROFILE_CHAR3_LEN] = {3};
         uint8_t charValue4[SIMPLEPROFILE_CHAR4_LEN] = {4};
@@ -413,10 +415,10 @@ uint16_t Task1_ProcessEvent(uint8_t task_id, uint16_t events)
               charValue1[21]=(u8)T_1[c_diff];
               SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR1, SIMPLEPROFILE_CHAR1_LEN, charValue1);
               //UART1_SendString(charValue1,SIMPLEPROFILE_CHAR1_LEN);
-              //printf("C:%d,B:%d,T_1:%d,T_2:%d,c_diff:%d\r\n",C[c_diff],B[c_diff],T_1[c_diff],T_2[c_diff],c_diff);
-              if((charValue1[0]==0))//未锟斤拷锟叫就斤拷锟叫硷拷锟斤拷锟叫断ｏ拷锟斤拷锟斤拷锟斤拷锟斤�?
+              printf("C:%d,B:%d,T_1:%d,T_2:%d,c_diff:%d\r\n",C[c_diff],B[c_diff],T_1[c_diff],T_2[c_diff],c_diff);
+              if((charValue1[0]==0))//未开始就进行预判判断，防止干扰
               {
-                //   if(((C[c_diff]>4000)||(C[c_diff]<800)||(B[c_diff]>4000)||(B[c_diff]<800)||(T[c_diff]>4000)||(T[c_diff]<800))&&(c_diff<4))//锟斤拷锟斤拷锟斤拷锟斤拷锟�
+                //   if(((C[c_diff]>4000)||(C[c_diff]<800)||(B[c_diff]>4000)||(B[c_diff]<800)||(T[c_diff]>4000)||(T[c_diff]<800))&&(c_diff<4))//刚开始的几组数据不能就进行判断，防止误判
                 //   {
                 //       Redled_flag++;
                 //       if(Redled_flag==3)
@@ -424,7 +426,7 @@ uint16_t Task1_ProcessEvent(uint8_t task_id, uint16_t events)
                 //           tmos_stop_task(TaskID_test1,TASK1_EVENT3);
                 //           GPIOA_ResetBits(GPIO_Pin_11);
                 //           GPIOA_SetBits(GPIO_Pin_10);
-                //           charValue1[0]=4;//锟借备锟斤拷锟斤拷
+                //           charValue1[0]=4;//设备故障
                 //           SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR1, SIMPLEPROFILE_CHAR1_LEN, charValue1);
                 //           tmos_stop_task(TaskID_test1,TASK1_EVENT1);
                 //           //tmos_stop_task(TaskID_test1,TASK1_EVENT2);
@@ -452,17 +454,17 @@ uint16_t Task1_ProcessEvent(uint8_t task_id, uint16_t events)
           {
               case 0://检测未开始
               {
-                  GPIOA_InverseBits(GPIO_Pin_10);
+                  GPIOB_InverseBits(GPIO_Pin_2);
                   tmos_start_task(TaskID_test1, TASK1_EVENT3 , 1600);
               }break;
               case 1://正在检测
               {
-                  GPIOA_InverseBits(GPIO_Pin_10);
+                  GPIOB_InverseBits(GPIO_Pin_2);
                   tmos_start_task(TaskID_test1, TASK1_EVENT3 , 400);
               }break;
               case 2://完成
               {
-                  GPIOA_ResetBits(GPIO_Pin_10);
+                  GPIOB_ResetBits(GPIO_Pin_2);
                   tmos_stop_task(TaskID_test1,TASK1_EVENT3);
               }break;
           }
@@ -470,7 +472,7 @@ uint16_t Task1_ProcessEvent(uint8_t task_id, uint16_t events)
           {
                 if (Time_Flag > 0x0258)//10分钟后常亮
                 {
-                        GPIOA_ResetBits(GPIO_Pin_10);
+                        GPIOB_ResetBits(GPIO_Pin_2);
                         //tmos_stop_task(TaskID_test1,TASK1_EVENT3);
                 }
             }
@@ -533,11 +535,65 @@ uint16_t Task1_ProcessEvent(uint8_t task_id, uint16_t events)
         SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR1, SIMPLEPROFILE_CHAR1_LEN, charValue1);
           return (events ^ TASK1_UART1);
       }
-    if(events & TASK1_TEST)//测试
+      if(events & TASK1_TEST)//测试
       {
+          switch(LED_flag)
+          {
+              case 1:
+              {
+                  ADC_ChannelCfg(5);
+                  AD_Run();
+                  C[c_diff]=sum[0];
+              }break;
+              case 2:
+              {
+                  AD_Run();
+                  T_2[c_diff]=sum[0];
+              }break;
+              case 3:
+              {
+                  ADC_ChannelCfg(8);
+                  AD_Run();
+                  B[c_diff]=sum[0];
+              }break;
+              case 4:
+              {
+                  AD_Run();
+                  T_1[c_diff]=sum[0];
+              }break;
+          }
+          LED_flag++;
+        //   if(newValue[4]==0x06)
+        //   { 
+        //   }
+        //   else
+        //    {LED(LED_flag);}
+          tmos_start_task(TaskID_test1,TASK1_TEST,400);
+          if(LED_flag==4)
+          {
+              tmos_stop_task(TaskID_test1,TASK1_TEST);
+                charValue2[3]=0x09;
+                charValue2[4]=0x06;
+                charValue2[5] = 1;
+                charValue2[6] = (C[c_diff]>> 8) & 0xFF; ; //数据域长度
+                charValue2[7] = (u8)C[c_diff];
 
+                charValue2[8] = (T_2[c_diff]>> 8) & 0xFF; ; //数据域长度
+                charValue2[9] = (u8)T_2[c_diff];
+
+                charValue2[10] = (B[c_diff]>> 8) & 0xFF; ; //数据域长度
+                charValue2[11] = (u8)B[c_diff];
+
+                charValue2[12] = (T_1[c_diff]>> 8) & 0xFF; ; //数据域长度
+                charValue2[13] = (u8)T_1[c_diff];
+
+                charValue2[14] = 0x5D;
+                UART1_SendString(charValue2, SIMPLEPROFILE_CHAR2_LEN);
+                SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR2, SIMPLEPROFILE_CHAR2_LEN, charValue2);
+          }
           return (events ^ TASK1_TEST);
       }
+
       // Discard unknown events
     return 0;
       return 0;
@@ -545,7 +601,200 @@ uint16_t Task1_ProcessEvent(uint8_t task_id, uint16_t events)
 
 void Up_ble_data(void)
 {
+    Standby_flag++;
+    charValue1[11]=(Standby_flag>> 8) & 0xFF; 
+    charValue1[12]=(u8)Standby_flag;
+    switch (charValue1[0]) 
+    {
+        case 0://待机计时
+        {
+            if (Standby_flag==1800) 
+            {
+                GPIOA_ResetBits(GPIO_Pin_11);
+                GPIOA_SetBits(GPIO_Pin_10);
+                charValue1[0]=3;//进入待机
+                tmos_stop_task(TaskID_test1,TASK1_EVENT1);
+                tmos_stop_task(TaskID_test1,TASK1_EVENT2);//停止计时
+                tmos_stop_task(TaskID_test1,TASK1_EVENT3);
+                tmos_stop_task(TaskID_test1,TASK1_EVENT4);
+                LED(4); //关灯
+            }
+        }break;
+        case 1://正在检测
+        {
+            if(Time_Flag <= What_time)
+            {
+                if (Time_Flag==0)//开始计时的时间戳
+                {
+                charValue1[13]=(Standby_flag>> 8) & 0xFF; 
+                charValue1[14]=(u8)Standby_flag;
+                }
+                if(Time_Flag<0x00ff)//把时间传出
+                {
+                    charValue1[2]=(u8)Time_Flag;
+                    charValue1[1]=0;
+                }
+                else
+                {
+                    charValue1[2]=(u8)Time_Flag;
+                    charValue1[1]=(u8)(Time_Flag>>8);
+                }
+                if ((Time_Flag==0x0384)||(Time_Flag==0x0258)||(Time_Flag==0x012C)||(Time_Flag==0x01E0)) //时间到5分钟、10分钟、15分钟时就开始最后一次检测
+                {
+                int arrtLength=sizeof(T)/sizeof(T[0]);
+                    for(int i = 1 ; i < arrtLength ; i++)
+                    {
+                        float dif = (float)T[i]/T[0];
+                        if(dif <secValue)
+                        {
+                            startIndex = i;
+                            break;
+                        }
+                    }
+                    if (startIndex < 0 || startIndex > 65)
+                    {
+                        startIndex = 65;
+                    }
 
+                    float T1 = (float)C[1]/T_1[1];
+                    float T2 = (float)C[1]/T_2[1];
+                    float B1 = (float)C[1]/B[1];
+
+                    float Tend=0;
+
+                    float Tend_1=0;
+                    float Tend_2=0;
+                    float Bend=0;
+                    float Cend=0;
+                        switch (Time_Flag)
+                        {
+                            case 900: //15分钟
+                            {
+                                for(int i = 0 ; i <10; i++)
+                                {
+                                    Tend_1 += T_1[startIndex+440+i]*T1/10;
+                                    Tend_2 += T_2[startIndex+440+i]*T2/10;
+                                }
+
+                                for(int i = 0 ; i <10; i++)
+                                {
+                                    Bend += B[startIndex+440+i]*B1/10;
+                                }
+
+                                for(int i = 0 ; i <10; i++)
+                                {
+                                    Cend += C[startIndex+440+i]/10;
+                                }
+                                Result_1=((Bend-Tend_1)/(Bend-Cend));
+                                Result_2=((Bend-Tend_2)/(Bend-Cend));
+                                memcpy(&byte_arr[24], &Result_1, sizeof(Result_1));
+                                memcpy(&byte_arr[28], &Result_2, sizeof(Result_2));
+                                B_led[2]=Bend/B[0];
+                                C_led[2]=Cend/C[0];
+                            }break;
+                            case 600: //10分钟
+                            {
+                                for(int i = 0 ; i <10; i++)
+                                {
+                                    Tend_1 += T_1[startIndex+290+i]*T1/10;
+                                    Tend_2 += T_2[startIndex+290+i]*T2/10;
+                                }
+
+                                for(int i = 0 ; i <10; i++)
+                                {
+                                    Bend += B[startIndex+290+i]*B1/10;
+                                }
+
+                                for(int i = 0 ; i <10; i++)
+                                {
+                                    Cend += C[startIndex+290+i]/10;
+                                }
+                                Result_1=((Bend-Tend_1)/(Bend-Cend));
+                                Result_2=((Bend-Tend_2)/(Bend-Cend));
+                                memcpy(&byte_arr[16], &Result_1, sizeof(Result_1));
+                                memcpy(&byte_arr[20], &Result_2, sizeof(Result_2));
+                                B_led[1]=Bend/B[0];
+                                C_led[1]=Cend/C[0];
+                            }break;
+                            case 300: //5分钟
+                            {
+                                memset(byte_arr, 0, sizeof(byte_arr));//清空上一轮结果
+                                for(int i = 0 ; i <10; i++)
+                                {
+                                    Tend_1 += T_1[startIndex+140+i]*T1/10;
+                                    Tend_2 += T_2[startIndex+140+i]*T2/10;
+                                }
+
+                                for(int i = 0 ; i <10; i++)
+                                {
+                                    Bend += B[startIndex+140+i]*B1/10;
+                                }
+
+                                for(int i = 0 ; i <10; i++)
+                                {
+                                    Cend += C[startIndex+140+i]/10;
+                                }
+                                Result_1=((Bend-Tend_1)/(Bend-Cend));
+                                Result_2=((Bend-Tend_2)/(Bend-Cend));
+                                memcpy(&byte_arr[0], &Result_1, sizeof(Result_1));
+                                memcpy(&byte_arr[4], &Result_2, sizeof(Result_2));
+                                B_led[0]=Bend/B[0];
+                                C_led[0]=Cend/C[0];
+                            }break;
+                            case 480://8分钟
+                            {
+                                for(int i = 0 ; i <10; i++)
+                                {
+                                    Tend_1 += T_1[startIndex+230+i]*T1/10;
+                                    Tend_2 += T_2[startIndex+230+i]*T2/10;
+                                }
+
+                                for(int i = 0 ; i <10; i++)
+                                {
+                                    Bend += B[startIndex+230+i]*B1/10;
+                                }
+
+                                for(int i = 0 ; i <10; i++)
+                                {
+                                    Cend += C[startIndex+230+i]/10;
+                                }
+                                Result_1=((Bend-Tend_1)/(Bend-Cend));
+                                Result_2=((Bend-Tend_2)/(Bend-Cend));
+                                memcpy(&byte_arr[8], &Result_1, sizeof(Result_1));
+                                memcpy(&byte_arr[12], &Result_2, sizeof(Result_2));
+                                B_led[0]=Bend/B[0];
+                                C_led[0]=Cend/C[0];
+                            }break;
+                        }
+                }
+                Time_Flag++;
+            }
+            else
+            {
+                charValue1[0]=2;                            //检测完成
+                // charValue1[1]=0;                            //时间清零
+                // charValue1[2]=0;                          //时间清零
+                charValue1[11]=(Standby_flag>> 8) & 0xFF; 
+                charValue1[12]=(u8)Standby_flag;
+                //tmos_stop_task(TaskID_test1,TASK1_EVENT1);//停止采集
+                tmos_set_event(TaskID_test1,TASK1_FLASH);
+                //tmos_stop_task(TaskID_test1,TASK1_EVENT2);//关闭计时
+                //LED(4);                                     //关灯
+            }
+        }break;
+        case 2:
+        {
+            if((Time_Flag-What_time) <= 120)
+            {Time_Flag++;}
+            else
+            {
+                tmos_stop_task(TaskID_test1,TASK1_EVENT1);//停止采集
+                tmos_stop_task(TaskID_test1,TASK1_EVENT2);//关闭计时
+                LED(4);                                   //关灯
+            }
+        }
+    }
+    //UART1_SendString(charValue1, sizeof(charValue1));
     SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR1, SIMPLEPROFILE_CHAR1_LEN, charValue1);
 }
 /*********************************************************************

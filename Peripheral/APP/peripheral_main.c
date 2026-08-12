@@ -85,9 +85,9 @@ int main(void)
     PFIC_EnableIRQ(UART1_IRQn);
 
     //LED状态灯
-    GPIOA_SetBits(GPIO_Pin_11);//11
-    GPIOA_SetBits(GPIO_Pin_10);//12
-    GPIOA_ModeCfg(GPIO_Pin_10|GPIO_Pin_11, GPIO_ModeOut_PP_5mA);
+    GPIOB_SetBits(GPIO_Pin_1);//11
+    GPIOB_SetBits(GPIO_Pin_2);//12
+    GPIOB_ModeCfg(GPIO_Pin_1|GPIO_Pin_2, GPIO_ModeOut_PP_5mA);
 
     //采集灯初始化
     GPIOB_SetBits(GPIO_Pin_9|GPIO_Pin_8|GPIO_Pin_17|GPIO_Pin_16);//led灯初始化1
