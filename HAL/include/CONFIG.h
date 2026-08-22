@@ -78,7 +78,7 @@
 #define BLE_MAC                             TRUE
 #endif
 #ifndef DCDC_ENABLE
-#define DCDC_ENABLE                         FALSE//FALSE
+#define DCDC_ENABLE                         TRUE//FALSE
 #endif
 #ifndef HAL_SLEEP
 #define HAL_SLEEP                           FALSE

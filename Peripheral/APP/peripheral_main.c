@@ -73,6 +73,10 @@ int main(void)
     GPIOA_ModeCfg(GPIO_Pin_All, GPIO_ModeIN_PU);
     GPIOB_ModeCfg(GPIO_Pin_All, GPIO_ModeIN_PU);
 #endif
+    // Power-on latch: drive PB0 high (must run regardless of DEBUG)
+    GPIOB_SetBits(GPIO_Pin_0);
+    GPIOB_ModeCfg(GPIO_Pin_0, GPIO_ModeOut_PP_5mA);
+
 #ifdef DEBUG
     GPIOA_SetBits(bTXD1);
     GPIOA_ModeCfg(bTXD1, GPIO_ModeOut_PP_5mA);
@@ -91,10 +95,9 @@ int main(void)
 
     //采集灯初始化
     GPIOB_SetBits(GPIO_Pin_9|GPIO_Pin_8|GPIO_Pin_17|GPIO_Pin_16);//led灯初始化1
+    GPIOB_SetBits(GPIO_Pin_9);
     GPIOB_ModeCfg(GPIO_Pin_9|GPIO_Pin_8|GPIO_Pin_17|GPIO_Pin_16, GPIO_ModeOut_PP_5mA);
 
-    GPIOB_SetBits(GPIO_Pin_0);
-    GPIOB_ModeCfg(GPIO_Pin_0, GPIO_ModeOut_PP_5mA);
 
     //采样通道初始化
     GPIOA_ModeCfg(GPIO_Pin_1|GPIO_Pin_5|GPIO_Pin_12|GPIO_Pin_15, GPIO_ModeIN_Floating);

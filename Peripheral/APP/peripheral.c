@@ -46,9 +46,41 @@ extern uint8_t trigB;
 
 //uint16_t Time_Flag=0x0258;//10分钟
 uint8_t Redled_flag;
+
+/* Breath LED: status LED (PB2) software PWM via Timer2 */
+#define BREATH_LED_PIN      GPIO_Pin_2
+#define BREATH_PWM_PERIOD   100
+#define BREATH_STEP_MS      24
+#define BREATH_STEP_TICK    (BREATH_STEP_MS * 1000 / 625)
+#define BREATH_TIMER_TICK   6240
+static volatile uint8_t breathEnable = 0;
+static volatile int16_t breathLevel = 0;
+static volatile uint8_t breathCnt = 0;
+static int8_t breathDir = 1;
+
+
+void Breath_PWM_Init(void);
+void Breath_Start(void);
+void Breath_Stop(void);
+void Key_GPIO_IT_Init(void);
+/******************** 电源按键（Key_1=PB4，Key_2=PB3） **********************/
+/* TMOS 定时单位为 625us（见 HAL/MCU.c 的 SYSTEM_TIME_MICROSEN），1s = 1600 tick */
+/* KEY1/PB4 和 KEY2/PB3 均使用边沿中断和单次定时器，不使用周期扫描。 */
+/* KEY1 长按 2 秒后关机；KEY2 拔出后启动 10 秒单次关机定时器。 */
+/* 关机为整体断电（PB0 拉低）；KEY1 手动关机后，保持关机直到试剂条拔出。 */
+/* TMOS 的计时单位为 625us，秒数换算为 tick 时必须先换算为微秒。 */
+#define PB4_KEY_LONG_TICK       (2UL * 1000 * 1000 / 625)
+#define PB3_SHUTDOWN_TICK       (10UL * 1000 * 1000 / 625)
+uint8_t System_PowerOn_Flag = 1;    // 1：已开机（上电即开机，main() 已把 PB0 拉高）
+static volatile uint8_t key1Pressed = 0;              // KEY1 当前是否按下
+static volatile uint8_t key2Pressed = 0;              // KEY2 当前是否按下（试剂条已插入）
+static volatile uint8_t pb4LongPressTimerActive = 0;  // KEY1 长按定时器是否已启动
+static uint8_t key1ShutdownLock = 0;                  // KEY1 手动关机锁存，拔出试剂条后解除
+static volatile uint8_t key1CommandPending = 0;       // 收到 0x06,0x01 命令后等待 KEY1 按下
+
 /********************修改默认检测时间*********/
-uint8_t What_time_flag=0x0F;
-uint16_t What_time=0x0384;
+uint8_t What_time_flag=0x05;
+uint16_t What_time=0x012C;
 /*******************************************/
 uint8_t Result_5min[3];
 uint8_t Result_10min[3];
@@ -126,7 +158,7 @@ void app_uart_process(void);
 #define SBP_PHY_UPDATE_DELAY                 2400
 
 // What is the advertising interval when device is discoverable (units of 625us, 80=50ms)
-#define DEFAULT_ADVERTISING_INTERVAL         160//80
+#define DEFAULT_ADVERTISING_INTERVAL         400//80
 
 // Limited discoverable mode advertises for 30.72s, and then stops
 // General discoverable mode advertises indefinitely
@@ -214,7 +246,6 @@ static uint8_t advertData[] = {
 };
 
 // GAP GATT Attributes
-//static uint8_t attDeviceName[GAP_DEVICE_NAME_LEN] = "JNC84C2E4036EFF";
 extern uint8_t attDeviceName[GAP_DEVICE_NAME_LEN];
 //attDeviceName[0]=scanRspData[5];
 
@@ -285,6 +316,25 @@ void Peripheral_Init()
 {
     Peripheral_TaskID = TMOS_ProcessEventRegister(Peripheral_ProcessEvent);
     TaskID_test1= TMOS_ProcessEventRegister(Task1_ProcessEvent);
+    // 初始化按键双边沿检测，并按当前电平建立首次按键状态。
+    Key_GPIO_IT_Init();
+    if(GPIOB_ReadPortPin(GPIO_Pin_4) == 0)
+    {
+        /* 上电时 KEY1 可能仍被按住，只等待松开，不能作为关机长按处理。 */
+        key1Pressed = 1;
+        GPIOB_ITModeCfg(GPIO_Pin_4, GPIO_ITMode_RiseEdge);
+    }
+    if(GPIOB_ReadPortPin(GPIO_Pin_3) == 0)
+    {
+        key2Pressed = 1;
+        GPIOB_ITModeCfg(GPIO_Pin_3, GPIO_ITMode_RiseEdge);
+        tmos_set_event(TaskID_test1, TASK1_KEY2_INSERT);
+    }
+    else
+    {
+        tmos_set_event(TaskID_test1, TASK1_KEY2_RELEASE);
+    }
+    Breath_PWM_Init();
     // Setup the GAP Peripheral Role Profile
     {
         uint8_t  initial_advertising_enable = TRUE;
@@ -368,11 +418,134 @@ void Peripheral_Init()
     tmos_start_reload_task( TaskID_test1, TASK1_EVENT3, 400);//开始指示灯事件
 
 }
+/*********************************************************************
+ * @fn      PB4_LongPress_Handler
+ *
+ * @brief   PB4 长按 2 秒回调，一次按下只触发一次
+ *
+ * @return  none
+ *********************************************************************/
+void PB4_PowerOn_Handler(void)
+{
+    // Key_1 短按开机：拉高 PB0（电源锁存）
+    GPIOB_SetBits(GPIO_Pin_0);
+    System_PowerOn_Flag = 1;
+    PRINT("Key1 power on\r\n");
+}
+
+void PB4_LongPress_Handler(void)
+{
+    // Key_1 长按 2 秒关机：拉低 PB0
+    GPIOB_ResetBits(GPIO_Pin_0);
+    System_PowerOn_Flag = 0;
+    PRINT("Key1 long press 2s power off\r\n");
+}
+
+void PB3_Shutdown_Handler(void)
+{
+    // Key_2 松开 10 秒倒计时结束关机：拉低 PB0
+    GPIOB_ResetBits(GPIO_Pin_0);
+    System_PowerOn_Flag = 0;
+    PRINT("Key2 released 10s power off\r\n");
+}
+
 uint16_t Task1_ProcessEvent(uint8_t task_id, uint16_t events)
 {
         int startIndex=-1;
         uint16_t    i,a,b;
         uint16_t    temp=0;
+      if(events & TASK1_KEY1_START)
+      {
+          /* 收到指定命令后的下一次 KEY1 按下，将响应状态写入 CHAR1 第 26 字节。 */
+          if(key1CommandPending)
+          {
+              key1CommandPending = 0;
+              charValue1[26] = 1;
+              SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR1, SIMPLEPROFILE_CHAR1_LEN, charValue1);
+          }
+
+          /* KEY1 按下后，在任务上下文启动 2 秒单次长按定时器。 */
+          if(key1Pressed && System_PowerOn_Flag && !key1ShutdownLock)
+          {
+              if(breathEnable)
+              {
+                  Breath_Stop();
+              }
+              tmos_start_task(TaskID_test1, TASK1_KEY1_LONG, PB4_KEY_LONG_TICK);
+          }
+          else
+          {
+              pb4LongPressTimerActive = 0;
+          }
+          return (events ^ TASK1_KEY1_START);
+      }
+
+      if(events & TASK1_KEY1_RELEASE)
+      {
+          /* KEY1 松开时取消未到期的长按定时器。 */
+          key1Pressed = 0;
+          pb4LongPressTimerActive = 0;
+          tmos_stop_task(TaskID_test1, TASK1_KEY1_LONG);
+          if(!key2Pressed)
+          {
+              key1ShutdownLock = 0;
+          }
+          return (events ^ TASK1_KEY1_RELEASE);
+      }
+
+      if(events & TASK1_KEY1_LONG)
+      {
+          /* 定时器到期后确认 KEY1 仍按下，短按和抖动均不会触发关机。 */
+          pb4LongPressTimerActive = 0;
+          if(key1Pressed && (GPIOB_ReadPortPin(GPIO_Pin_4) == 0) &&
+             System_PowerOn_Flag && !key1ShutdownLock)
+          {
+              key1ShutdownLock = 1;
+              tmos_stop_task(TaskID_test1, TASK1_EVENT3); // 停止状态指示灯定时任务
+              GPIOB_SetBits(GPIO_Pin_1);
+              GPIOB_SetBits(GPIO_Pin_2);
+              PB4_LongPress_Handler();
+          }
+          return (events ^ TASK1_KEY1_LONG);
+      }
+
+      if(events & TASK1_KEY2_INSERT)
+      {
+          /* 试剂条插入时取消拔出关机定时器，并自动保持开机。 */
+          key2Pressed = 1;
+          tmos_stop_task(TaskID_test1, TASK1_KEY2_SHUTDOWN);
+          if(!key1ShutdownLock)
+          {
+              GPIOB_SetBits(GPIO_Pin_0);
+              System_PowerOn_Flag = 1;
+          }
+          return (events ^ TASK1_KEY2_INSERT);
+      }
+
+      if(events & TASK1_KEY2_RELEASE)
+      {
+          /* 试剂条拔出后启动一次 10 秒关机定时器。 */
+          key2Pressed = 0;
+          if(!key1Pressed)
+          {
+              key1ShutdownLock = 0;
+          }
+          if(System_PowerOn_Flag)
+          {
+              tmos_start_task(TaskID_test1, TASK1_KEY2_SHUTDOWN, PB3_SHUTDOWN_TICK);
+          }
+          return (events ^ TASK1_KEY2_RELEASE);
+      }
+
+      if(events & TASK1_KEY2_SHUTDOWN)
+      {
+          /* 定时器到期后再次确认试剂条仍未插入，避免拔插过程中误关机。 */
+        //   if(!key2Pressed && (GPIOB_ReadPortPin(GPIO_Pin_3) != 0) && System_PowerOn_Flag)
+        //   {
+        //       PB3_Shutdown_Handler();
+        //   }
+          return (events ^ TASK1_KEY2_SHUTDOWN);
+      }
       if(events & TASK1_EVENT1)
       {
           switch(LED_flag)
@@ -405,16 +578,16 @@ uint16_t Task1_ProcessEvent(uint8_t task_id, uint16_t events)
           if(LED_flag==5)
           {
               LED_flag=0;
-              charValue1[14]=(C[c_diff]>> 8) & 0xFF; 
-              charValue1[15]=(u8)C[c_diff];
-              charValue1[16]=(T_2[c_diff]>> 8) & 0xFF; 
-              charValue1[17]=(u8)T_2[c_diff];
-              charValue1[18]=(B[c_diff]>> 8) & 0xFF; 
-              charValue1[19]=(u8)B[c_diff];
-              charValue1[20]=(T_1[c_diff]>> 8) & 0xFF; 
-              charValue1[21]=(u8)T_1[c_diff];
+              charValue1[18]=(C[c_diff]>> 8) & 0xFF; 
+              charValue1[19]=(u8)C[c_diff];
+              charValue1[20]=(T_2[c_diff]>> 8) & 0xFF; 
+              charValue1[21]=(u8)T_2[c_diff];
+              charValue1[22]=(B[c_diff]>> 8) & 0xFF; 
+              charValue1[23]=(u8)B[c_diff];
+              charValue1[24]=(T_1[c_diff]>> 8) & 0xFF; 
+              charValue1[25]=(u8)T_1[c_diff];
               SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR1, SIMPLEPROFILE_CHAR1_LEN, charValue1);
-              //UART1_SendString(charValue1,SIMPLEPROFILE_CHAR1_LEN);
+              UART1_SendString(charValue1,SIMPLEPROFILE_CHAR1_LEN);
               printf("C:%d,B:%d,T_1:%d,T_2:%d,c_diff:%d\r\n",C[c_diff],B[c_diff],T_1[c_diff],T_2[c_diff],c_diff);
               if((charValue1[0]==0))//未开始就进行预判判断，防止干扰
               {
@@ -485,11 +658,11 @@ uint16_t Task1_ProcessEvent(uint8_t task_id, uint16_t events)
           {
               if(c_diff>=10)
             {
-                dif = (float)T[c_diff]/T[c_diff-10];
+                dif = (float)T_1[c_diff]/T_1[c_diff-10];
             }
             else 
             {
-                dif = (float)T[c_diff]/T[0];
+                dif = (float)T_1[c_diff]/T_1[0];
             }
               if(dif <secValue)
               {
@@ -525,14 +698,106 @@ uint16_t Task1_ProcessEvent(uint8_t task_id, uint16_t events)
           uint8_t  s;
           uint16_t z;
           uint16_t x;
+          for( x=0,z=0; z<460;z++)//c
+          {
+                C_DATA[x] = (C[z] >> 8) & 0xff;
+                C_DATA[x+1] = C[z] & 0xff;
+                x=x+2;
+          }
+          s = EEPROM_ERASE(0, 1024);
+          s = EEPROM_WRITE(0, C_DATA, 1024);
+
+          for( x=0,z=0; z<460;z++)//b
+          {
+              C_DATA[x] = (B[z] >> 8) & 0xff;
+              C_DATA[x+1] = B[z] & 0xff;
+                x=x+2;
+          }
+          s = EEPROM_ERASE(1024, 1024);
+          s = EEPROM_WRITE(1024, C_DATA, 1024);
+
+          for( x=0,z=0; z<460;z++)//T1
+          {
+              C_DATA[x] = (T_1[z] >> 8) & 0xff;
+              C_DATA[x+1] = T_1[z] & 0xff;
+              x=x+2;
+          }
+          s = EEPROM_ERASE(2048, 1024);
+          s = EEPROM_WRITE(2048, C_DATA, 1024);
+
+          for( x=0,z=0; z<460;z++)//T2
+          {
+              C_DATA[x] = (T_2[z] >> 8) & 0xff;
+              C_DATA[x+1] = T_2[z] & 0xff;
+              x=x+2;
+          }
+          s = EEPROM_ERASE(12544,256);//擦除
+          s = EEPROM_WRITE(12544, C_DATA, 1024);//写入
 
           tmos_set_event(TaskID_test1,TASK1_UART1);
           return (events ^ TASK1_FLASH);
       }
       if(events & TASK1_UART1)//算法
       {
-
-        SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR1, SIMPLEPROFILE_CHAR1_LEN, charValue1);
+           uint8_t s;
+            if(charValue1[0] == 2)
+              {
+                switch(What_time_flag)
+                {
+                    case 0x05 : //5分钟
+                    {
+                        // 5分钟：byte_arr[0..3] 为T1，byte_arr[4..7] 为T2。
+                        charValue1[3] = byte_arr[0];
+                        charValue1[4] = byte_arr[1];
+                        charValue1[5] = byte_arr[2];
+                        charValue1[6] = byte_arr[3];
+                        charValue1[7] = byte_arr[4];
+                        charValue1[8] = byte_arr[5];
+                        charValue1[9] = byte_arr[6];
+                        charValue1[10] = byte_arr[7];
+                    }break;
+                    case 0x0A : //10分钟
+                    {
+                        // 10分钟：byte_arr[16..19] 为T1，byte_arr[20..23] 为T2。
+                        charValue1[3] = byte_arr[16];
+                        charValue1[4] = byte_arr[17];
+                        charValue1[5] = byte_arr[18];
+                        charValue1[6] = byte_arr[19];
+                        charValue1[7] = byte_arr[20];
+                        charValue1[8] = byte_arr[21];
+                        charValue1[9] = byte_arr[22];
+                        charValue1[10] = byte_arr[23];
+                    }break;
+                    case 0x0F : //15分钟
+                    {
+                        // 15分钟：byte_arr[24..27] 为T1，byte_arr[28..31] 为T2。
+                        charValue1[3] = byte_arr[24];
+                        charValue1[4] = byte_arr[25];
+                        charValue1[5] = byte_arr[26];
+                        charValue1[6] = byte_arr[27];
+                        charValue1[7] = byte_arr[28];
+                        charValue1[8] = byte_arr[29];
+                        charValue1[9] = byte_arr[30];
+                        charValue1[10] = byte_arr[31];
+                    }break;
+                    case 0x08 : //8分钟
+                    {
+                        // 8分钟：byte_arr[8..11] 为T1，byte_arr[12..15] 为T2。
+                        charValue1[3] = byte_arr[8];
+                        charValue1[4] = byte_arr[9];
+                        charValue1[5] = byte_arr[10];
+                        charValue1[6] = byte_arr[11];
+                        charValue1[7] = byte_arr[12];
+                        charValue1[8] = byte_arr[13];
+                        charValue1[9] = byte_arr[14];
+                        charValue1[10] = byte_arr[15];
+                    }break;
+                }
+                s = EEPROM_ERASE(3584,256);//擦除
+                s = EEPROM_WRITE(3584, byte_arr, 12);//写入 
+                tmos_start_reload_task(TaskID_test1, TASK1_EVENT2 , 1600);//存完数据打开计时
+            }
+          SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR1, SIMPLEPROFILE_CHAR1_LEN, charValue1);
           return (events ^ TASK1_UART1);
       }
       if(events & TASK1_TEST)//测试
@@ -593,7 +858,25 @@ uint16_t Task1_ProcessEvent(uint8_t task_id, uint16_t events)
           }
           return (events ^ TASK1_TEST);
       }
-
+      if(events & TASK1_BREATH)
+      {
+          if(breathEnable)
+          {
+              breathLevel += breathDir;
+              if(breathLevel >= BREATH_PWM_PERIOD)
+              {
+                  breathLevel = BREATH_PWM_PERIOD;
+                  breathDir = -1;
+              }
+              else if(breathLevel <= 0)
+              {
+                  breathLevel = 0;
+                  breathDir = 1;
+              }
+              tmos_start_task(TaskID_test1, TASK1_BREATH, BREATH_STEP_TICK);
+          }
+          return (events ^ TASK1_BREATH);
+      }
       // Discard unknown events
     return 0;
       return 0;
@@ -1256,12 +1539,12 @@ static void simpleProfileChangeCB(uint8_t paramID, uint8_t *pValue, uint16_t len
 
                     break;
                 case 0x02:
-                    charValue2[4] = 0x01; 
-                    if (newValue[5] == 0x02)
-                    {
-                        //GPIOB_ResetBits(GPIO_Pin_20);
-                        SYS_ResetExecute();
-                    }
+                    // charValue2[4] = 0x01; 
+                    // if (newValue[5] == 0x02)
+                    // {
+                    //     //GPIOB_ResetBits(GPIO_Pin_20);
+                    //     SYS_ResetExecute();
+                    // }
                     break;
                 case 0x03:
                     GPIOB_ResetBits(GPIO_Pin_20);
@@ -1273,7 +1556,22 @@ static void simpleProfileChangeCB(uint8_t paramID, uint8_t *pValue, uint16_t len
                     GPIOB_SetBits(GPIO_Pin_9|GPIO_Pin_8|GPIO_Pin_17|GPIO_Pin_16);
                     LED_flag=0;
                     c_diff=0;
+                    Breath_Stop();
                     tmos_start_reload_task(TaskID_test1, TASK1_TEST, 400);
+                    break;
+                case 0x06:
+                    if(newValue[5] == 0x01)
+                    {
+                        /* 命令有效后等待下一次 KEY1 按下，再上报 CHAR1[26] = 1。 */
+                        key1CommandPending = 1;
+                        charValue1[26] = 0;
+                        charValue2[4] = 0x06;
+                        charValue2[5] = 0x11;
+                        charValue2[6] = 0x5D;
+                        tmos_stop_task(TaskID_test1, TASK1_EVENT3);
+                        Breath_Start();
+                        tmos_start_task(TaskID_test1, TASK1_BREATH, BREATH_STEP_TICK);
+                    }
                     break;
                 }
                 SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR2, SIMPLEPROFILE_CHAR2_LEN, charValue2);
@@ -1388,35 +1686,190 @@ void hex_to_asciistring(u8* str,u32 size,u8* str1)
    return ;
 }
 
-void AD_Run(void)//ad采集函数
+#define AD_N       32   /* samples per batch: dark room -> 32 for better smoothing */
+#define AD_TRIM    4    /* per-side trim count when falling back to trimmed mean */
+#define AD_K       3    /* MAD threshold multiplier */
+
+/* insertion sort for small uint16_t arrays */
+static void sort_u16(uint16_t *a, uint16_t n)
 {
-    u_int8_t i;
-    for(i = 0; i < 21; i++)
+    uint16_t i;
+    for(i = 1; i < n; i++)
     {
-        adcBuff[i] = ADC_ExcutSingleConver();//+RoughCalib_Value; // 连续采样20次
-    }
-    bubbleSort(adcBuff,20);//调用冒泡排序函数
-    sum[0]=adcBuff[10];
-    // if(sum[0]<1000)
-    // {
-    //     PRINT("sum=%d\n,LED_flag=%d\n",sum[0],LED_flag);
-    //     ADC_ExtSingleChSampInit(SampleFreq_8_or_4, ADC_PGA_1_2);
-    //     ADC_ChannelCfg(10);
-    //     for(i = 0; i < 21; i++)
-    //     {
-    //         adcBuff[i] = ADC_ExcutSingleConver();//+RoughCalib_Value; // 连续采样20次
-    //     }
-    //     bubbleSort(adcBuff,20);//调用冒泡排序函数
-    //     sum[0]=adcBuff[10];
-    //     PRINT("sum_1=%d\n,LED_flag=%d\n",sum[0],LED_flag);
-    //     ADC_ExtSingleChSampInit(SampleFreq_8_or_4, ADC_PGA_0);
-    // }
-    for(i = 2; i < 18; i++)
-    {
-        sum[0]=sum[0]+adcBuff[i];
-        if(i==17)
+        uint16_t key = a[i];
+        int16_t  j   = (int16_t)i - 1;
+
+        while(j >= 0 && a[j] > key)
         {
-            sum[0]=sum[0]/16;
+            a[j + 1] = a[j];
+            j--;
+        }
+        a[j + 1] = key;
+    }
+}
+
+void AD_Run(void)
+{
+    uint16_t raw[AD_N];
+    uint16_t med, mad;
+    uint32_t lo, hi;
+    uint32_t acc = 0;
+    uint16_t cnt = 0;
+    uint16_t i;
+
+    /* 1. collect AD_N raw ADC samples */
+    for(i = 0; i < AD_N; i++)
+    {
+        raw[i] = ADC_ExcutSingleConver();
+    }
+
+    /* 2. sort and take median */
+    sort_u16(raw, AD_N);
+    med = (uint16_t)((raw[AD_N / 2 - 1] + raw[AD_N / 2]) >> 1);
+
+    /* 3. compute MAD to estimate noise level */
+    {
+        uint16_t dev[AD_N];
+        for(i = 0; i < AD_N; i++)
+        {
+            dev[i] = (raw[i] > med) ? (uint16_t)(raw[i] - med)
+                                    : (uint16_t)(med - raw[i]);
+        }
+        sort_u16(dev, AD_N);
+        mad = (uint16_t)((dev[AD_N / 2 - 1] + dev[AD_N / 2]) >> 1);
+    }
+
+    /* 4. fallback to trimmed mean when noise is too low */
+    if(mad <= 1)
+    {
+        for(i = AD_TRIM; i < AD_N - AD_TRIM; i++)
+        {
+            acc += raw[i];
+        }
+        sum[0] = (uint16_t)(acc / (AD_N - 2 * AD_TRIM));
+        return;
+    }
+
+    /* 5. reject outliers outside median +/- K*MAD */
+    lo = (med > (uint32_t)AD_K * mad) ? (uint32_t)(med - AD_K * mad) : 0;
+    hi = (uint32_t)med + (uint32_t)AD_K * mad;
+
+    for(i = 0; i < AD_N; i++)
+    {
+        if(raw[i] >= lo && raw[i] <= hi)
+        {
+            acc += raw[i];
+            cnt++;
+        }
+    }
+
+    /* 6. fallback to median if too many outliers */
+    sum[0] = (cnt >= AD_N / 2) ? (uint16_t)(acc / cnt) : med;
+}
+
+
+/* Breath LED: software PWM on the status LED using Timer2 */
+void Breath_PWM_Init(void)
+{
+    TMR2_TimerInit(BREATH_TIMER_TICK);
+    TMR2_ITCfg(ENABLE, TMR0_3_IT_CYC_END);
+    PFIC_EnableIRQ(TMR2_IRQn);
+    TMR2_Disable();
+}
+
+void Breath_Start(void)
+{
+    GPIOB_SetBits(BREATH_LED_PIN);
+    breathLevel = 0;
+    breathDir = 1;
+    breathCnt = 0;
+    TMR2_TimerInit(BREATH_TIMER_TICK);
+    breathEnable = 1;
+}
+
+void Breath_Stop(void)
+{
+    breathEnable = 0;
+    TMR2_Disable();
+    GPIOB_SetBits(BREATH_LED_PIN);
+}
+
+__INTERRUPT
+__HIGH_CODE
+void TMR2_IRQHandler(void)
+{
+    if(TMR2_GetITFlag(TMR0_3_IT_CYC_END))
+    {
+        TMR2_ClearITFlag(TMR0_3_IT_CYC_END);
+        if(breathEnable)
+        {
+            if(breathCnt < breathLevel)
+            {
+                GPIOB_ResetBits(BREATH_LED_PIN);
+            }
+            else
+            {
+                GPIOB_SetBits(BREATH_LED_PIN);
+            }
+            if(++breathCnt >= BREATH_PWM_PERIOD)
+            {
+                breathCnt = 0;
+            }
+        }
+    }
+}
+
+void Key_GPIO_IT_Init(void)
+{
+    GPIOB_ModeCfg(GPIO_Pin_4 | GPIO_Pin_3, GPIO_ModeIN_PU);
+    GPIOB_ITModeCfg(GPIO_Pin_4, GPIO_ITMode_FallEdge);
+    GPIOB_ITModeCfg(GPIO_Pin_3, GPIO_ITMode_FallEdge);
+    PFIC_EnableIRQ(GPIO_B_IRQn);
+}
+
+__INTERRUPT
+__HIGH_CODE
+void GPIOB_IRQHandler(void)
+{
+    if(GPIOB_ReadITFlagBit(GPIO_Pin_4))
+    {
+        GPIOB_ClearITFlagBit(GPIO_Pin_4);
+        if(GPIOB_ReadPortPin(GPIO_Pin_4) == 0)
+        {
+            /* 按下后切换为上升沿检测，以捕获 KEY1 松开事件。 */
+            key1Pressed = 1;
+            GPIOB_ITModeCfg(GPIO_Pin_4, GPIO_ITMode_RiseEdge);
+            if(!pb4LongPressTimerActive)
+            {
+                pb4LongPressTimerActive = 1;
+                tmos_set_event(TaskID_test1, TASK1_KEY1_START);
+            }
+        }
+        else
+        {
+            /* 松开后恢复下降沿检测，准备下一次 KEY1 按下。 */
+            key1Pressed = 0;
+            GPIOB_ITModeCfg(GPIO_Pin_4, GPIO_ITMode_FallEdge);
+            tmos_set_event(TaskID_test1, TASK1_KEY1_RELEASE);
+        }
+    }
+
+    if(GPIOB_ReadITFlagBit(GPIO_Pin_3))
+    {
+        GPIOB_ClearITFlagBit(GPIO_Pin_3);
+        if(GPIOB_ReadPortPin(GPIO_Pin_3) == 0)
+        {
+            /* 试剂条插入后切换为上升沿检测，以捕获试剂条拔出事件。 */
+            key2Pressed = 1;
+            GPIOB_ITModeCfg(GPIO_Pin_3, GPIO_ITMode_RiseEdge);
+            tmos_set_event(TaskID_test1, TASK1_KEY2_INSERT);
+        }
+        else
+        {
+            /* 试剂条拔出后恢复下降沿检测，准备下一次插入。 */
+            key2Pressed = 0;
+            GPIOB_ITModeCfg(GPIO_Pin_3, GPIO_ITMode_FallEdge);
+            tmos_set_event(TaskID_test1, TASK1_KEY2_RELEASE);
         }
     }
 }
@@ -1670,39 +2123,39 @@ void uart_tx(uint8_t x)
         }break;
         case 3://读取SN
         {
-            uart_tx_buffer[3]=0x0E;
-            uart_tx_buffer[4]=0x02;
-            uart_tx_buffer[5]=0x11;
-            EEPROM_READ(12544, SN, 14);//读取SN号
-            for(i=0;i<14;i++)
-            {
-                uart_tx_buffer[6+i]=SN[i];
-            }
-            uart_tx_buffer[20]=0x5D;
-            UART1_SendString(uart_tx_buffer,21);
+            // uart_tx_buffer[3]=0x0E;
+            // uart_tx_buffer[4]=0x02;
+            // uart_tx_buffer[5]=0x11;
+            // EEPROM_READ(12544, SN, 14);//读取SN号
+            // for(i=0;i<14;i++)
+            // {
+            //     uart_tx_buffer[6+i]=SN[i];
+            // }
+            // uart_tx_buffer[20]=0x5D;
+            // UART1_SendString(uart_tx_buffer,21);
         }break;
         case 4://写入SN
         {
-            uart_tx_buffer[3]=0x01;
-            uart_tx_buffer[4]=0x02;
-            uart_tx_buffer[5]=0x12;
-            for(i=0;i<14;i++)
-            {
-                RxBuff[i]=RxBuff[6+i];
-            }
-            s = EEPROM_ERASE(12544,256);//擦除
-            s = EEPROM_WRITE(12544, RxBuff, 14);//写入
-            EEPROM_READ(12544, SN, 14);//读取
-            if((SN[0]==RxBuff[0])&&(SN[1]==RxBuff[1])&&(SN[2]==RxBuff[2])&&(SN[3]==RxBuff[3])&&(SN[4]==RxBuff[4])&&(SN[5]==RxBuff[5])&&(SN[12]==RxBuff[12])&&(SN[13]==RxBuff[13]))
-            {
-                uart_tx_buffer[6]=1;
-            }
-            else
-            {
-                uart_tx_buffer[6]=0;
-            }
-            uart_tx_buffer[7]=0x5D;
-            UART1_SendString(uart_tx_buffer,8);
+            // uart_tx_buffer[3]=0x01;
+            // uart_tx_buffer[4]=0x02;
+            // uart_tx_buffer[5]=0x12;
+            // for(i=0;i<14;i++)
+            // {
+            //     RxBuff[i]=RxBuff[6+i];
+            // }
+            // s = EEPROM_ERASE(12544,256);//擦除
+            // s = EEPROM_WRITE(12544, RxBuff, 14);//写入
+            // EEPROM_READ(12544, SN, 14);//读取
+            // if((SN[0]==RxBuff[0])&&(SN[1]==RxBuff[1])&&(SN[2]==RxBuff[2])&&(SN[3]==RxBuff[3])&&(SN[4]==RxBuff[4])&&(SN[5]==RxBuff[5])&&(SN[12]==RxBuff[12])&&(SN[13]==RxBuff[13]))
+            // {
+            //     uart_tx_buffer[6]=1;
+            // }
+            // else
+            // {
+            //     uart_tx_buffer[6]=0;
+            // }
+            // uart_tx_buffer[7]=0x5D;
+            // UART1_SendString(uart_tx_buffer,8);
         }break;
         case 5://版本号
         {

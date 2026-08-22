@@ -27,11 +27,10 @@ __HIGH_CODE
 uint32_t CH58x_LowPower(uint32_t time)
 {
 #if(defined(HAL_SLEEP)) && (HAL_SLEEP == TRUE)
-    volatile uint32_t i;
     uint32_t time_tign, time_sleep, time_curr;
     unsigned long irq_status;
 
-    // 提前唤醒
+    /* wake earlier by crystal stabilization margin */
     if (time <= WAKE_UP_RTC_MAX_TIME) {
         time_tign = time + (RTC_MAX_COUNT - WAKE_UP_RTC_MAX_TIME);
     } else {
@@ -40,15 +39,13 @@ uint32_t CH58x_LowPower(uint32_t time)
 
     SYS_DisableAllIrq(&irq_status);
     time_curr = RTC_GetCycle32k();
-    // 检测睡眠时间
     if (time_tign < time_curr) {
         time_sleep = time_tign + (RTC_MAX_COUNT - time_curr);
     } else {
         time_sleep = time_tign - time_curr;
     }
 
-    // 若睡眠时间小于最小睡眠时间或大于最大睡眠时间，则不睡眠
-    if ((time_sleep < SLEEP_RTC_MIN_TIME) || 
+    if ((time_sleep < SLEEP_RTC_MIN_TIME) ||
         (time_sleep > SLEEP_RTC_MAX_TIME)) {
         SYS_RecoverIrq(irq_status);
         return 2;
@@ -56,17 +53,17 @@ uint32_t CH58x_LowPower(uint32_t time)
 
     RTC_SetTignTime(time_tign);
     SYS_RecoverIrq(irq_status);
-#if(DEBUG == Debug_UART1) // 使用其他串口输出打印信息需要修改这行代码
+#if(DEBUG == Debug_UART1)
     while((R8_UART1_LSR & RB_LSR_TX_ALL_EMP) == 0)
     {
         __nop();
     }
 #endif
-    // LOW POWER-sleep模式
+
     if(!RTCTigFlag)
     {
-        LowPower_Sleep(RB_PWR_RAM32K | RB_PWR_RAM96K | RB_PWR_EXTEND |RB_XT_PRE_EN );
-        HSECFG_Current(HSE_RCur_100); // 降为额定电流(低功耗函数中提升了HSE偏置电流)
+        LowPower_Idle();
+        HSECFG_Current(HSE_RCur_100);
         return 0;
     }
 #endif

@@ -129,7 +129,7 @@ void CH58x_BLEInit(void)
     cfg.idleCB = CH58x_LowPower; // ∆Ù”√ÀØ√ﬂ
 #endif
 #if(defined(BLE_MAC)) && (BLE_MAC == TRUE)
-    EEPROM_READ(3072, MacAddr, 6);
+    EEPROM_READ(12288, MacAddr, 6);
 
     if(MacAddr[0]==0xff&&MacAddr[1]==0xff&&MacAddr[2]==0xff&&MacAddr[3]==0xff&&MacAddr[4]==0xff&&MacAddr[5]==0xff)
     {
@@ -152,7 +152,7 @@ void CH58x_BLEInit(void)
     hex_to_asciistring(MacAddr,12,addrmac_str1);
     attDeviceName[0]=0x4A;
     attDeviceName[1]=0x4E;
-    attDeviceName[2]=0x41;
+    attDeviceName[2]=0x42;
     for(i = 0; i < 12; i++)
     {
         scanRspData[5+i]=addrmac_str1[i];

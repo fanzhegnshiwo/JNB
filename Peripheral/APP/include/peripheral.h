@@ -40,8 +40,14 @@ extern "C" {
 #define TASK1_EVENT4    0x0004//加样检测
 #define TASK1_FLASH     0x0020//读写数据
 #define TASK1_UART1     0x0010
-#define TASK1_TEST      0x0040
-#define TASK1_LED       0x0080
+#define TASK1_TEST          0x0040
+#define TASK1_KEY2_SHUTDOWN 0x0080
+#define TASK1_BREATH        0x0200
+#define TASK1_KEY1_START    0x0400
+#define TASK1_KEY1_LONG     0x0800
+#define TASK1_KEY1_RELEASE  0x1000
+#define TASK1_KEY2_INSERT   0x2000
+#define TASK1_KEY2_RELEASE  0x4000
 /*********************************************************************
  * MACROS
  */
